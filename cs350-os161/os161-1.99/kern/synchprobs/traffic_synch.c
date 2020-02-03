@@ -21,8 +21,23 @@
 /*
  * replace this with declarations of any synchronization and other variables you need here
  */
-static struct semaphore *intersectionSem;
 
+
+#define typeNum 4
+#define empty 0
+static struct lock *intersection_lk;
+static volatile int curnumLeft;
+static volatile Direction curtype;
+static volatile bool blocked;
+
+/* There are 4 types: 0 = all traffic from North
+                      1 = all traffic from East
+                      2 = all traffic from South
+                      3 = all traffic from West
+*/
+
+static volatile int wait_on_type[typeNum];
+static struct cv *cv_pos[typeNum];
 
 /* 
  * The simulation driver will call this function once before starting
@@ -31,14 +46,44 @@ static struct semaphore *intersectionSem;
  * You can use it to initialize synchronization and other variables.
  * 
  */
+
 void
 intersection_sync_init(void)
 {
-  /* replace this default implementation with your own implementation */
+  intersection_lk = lock_create("intersection lock");
+  if (intersection_lk == NULL) {
+    panic("Unable to create intersection lock");
+  }
+  for (int i = 0; i < typeNum; i++) {
+    wait_on_type[i] = 0;
+  }
+  curnumLeft = 1;
+  curtype = 10;
+  blocked = false;
 
-  intersectionSem = sem_create("intersectionSem",1);
-  if (intersectionSem == NULL) {
-    panic("could not create intersection semaphore");
+  cv_pos[0] = cv_create("all traffic from north"); // type 0
+  if (cv_pos[0] == NULL) {
+    panic("Unable to create cv_N");
+    lock_destroy(intersection_lk);
+    return;
+  }
+  cv_pos[1] = cv_create("all traffic from south"); // type 1
+  if (cv_pos[1] == NULL) {
+    panic("Unable to create cv_S");
+    lock_destroy(intersection_lk);
+    return;
+  }
+  cv_pos[2] = cv_create("all traffic from east"); // type 2
+  if (cv_pos[2] == NULL) {
+    panic("Unable to create cv_E");
+    lock_destroy(intersection_lk);
+    return;
+  }
+  cv_pos[3] = cv_create("all traffic from west"); // type 3
+  if (cv_pos[3] == NULL) {
+    panic("Unable to create cv_W");
+    lock_destroy(intersection_lk);
+    return;
   }
   return;
 }
@@ -53,11 +98,15 @@ intersection_sync_init(void)
 void
 intersection_sync_cleanup(void)
 {
-  /* replace this default implementation with your own implementation */
-  KASSERT(intersectionSem != NULL);
-  sem_destroy(intersectionSem);
-}
+  KASSERT(intersection_lk != NULL);
+  lock_destroy(intersection_lk);
 
+  for (int i = 0; i < typeNum; ++i) {
+    KASSERT(wait_on_type[i] == 0);
+    KASSERT(cv_pos[i] != NULL);
+    cv_destroy(cv_pos[i]);
+  }
+}
 
 /*
  * The simulation driver will call this function each time a vehicle
@@ -75,11 +124,19 @@ intersection_sync_cleanup(void)
 void
 intersection_before_entry(Direction origin, Direction destination) 
 {
-  /* replace this default implementation with your own implementation */
-  (void)origin;  /* avoid compiler complaint about unused parameter */
-  (void)destination; /* avoid compiler complaint about unused parameter */
-  KASSERT(intersectionSem != NULL);
-  P(intersectionSem);
+  (void)destination;
+
+  KASSERT(intersection_lk != NULL);
+  lock_acquire(intersection_lk);
+  if (curtype == 10) { // first traffic entered.
+    curtype = origin;
+  }
+  if (origin != curtype || blocked) {
+    wait_on_type[origin] += 1;
+    cv_wait(cv_pos[origin],intersection_lk);
+  }
+  blocked = true;
+  lock_release(intersection_lk);
 }
 
 
@@ -97,9 +154,28 @@ intersection_before_entry(Direction origin, Direction destination)
 void
 intersection_after_exit(Direction origin, Direction destination) 
 {
-  /* replace this default implementation with your own implementation */
-  (void)origin;  /* avoid compiler complaint about unused parameter */
-  (void)destination; /* avoid compiler complaint about unused parameter */
-  KASSERT(intersectionSem != NULL);
-  V(intersectionSem);
+  (void)origin;  
+  (void)destination;
+  
+  lock_acquire(intersection_lk);
+  curnumLeft -= 1;
+  if (curnumLeft <= 0) {
+    if (wait_on_type[0] <= 0 && wait_on_type[1] <= 0 && wait_on_type[2] <= 0 && wait_on_type[3] <= 0) {
+      curnumLeft = 1;
+      blocked = false;
+      curtype = 10;
+      lock_release(intersection_lk);
+      return;
+    }
+    curnumLeft = 0;
+    blocked = true;
+    curtype = (curtype + 1) % 4;
+    while(wait_on_type[curtype] <= 0 ) {
+      curtype = (curtype + 1) % 4;
+    }
+    curnumLeft = wait_on_type[curtype];
+    wait_on_type[curtype] = 0;
+    cv_broadcast(cv_pos[curtype], intersection_lk);
+  }
+  lock_release(intersection_lk);
 }
