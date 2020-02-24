@@ -38,12 +38,34 @@
 
 #include <spinlock.h>
 #include <thread.h> /* required for struct threadarray */
+#include <array.h>
+#include <opt-A2.h>
 
 struct addrspace;
 struct vnode;
 #ifdef UW
 struct semaphore;
 #endif // UW
+
+
+#if OPT_A2
+struct lock;
+struct cv;
+
+struct array *proc_table; // an array of proc
+struct lock *proc_table_lock;
+struct cv *proc_table_cv;
+
+struct proc_info {
+	pid_t self_pid;
+	pid_t parent_pid;
+	int alive_or_not; // 1 indicates alive and 0 indicates zombie state
+	int exit_code;
+};
+
+
+#endif /* OPT_A2 */
+
 
 /*
  * Process structure.
@@ -69,6 +91,11 @@ struct proc {
 #endif
 
 	/* add more material here as needed */
+#if OPT_A2
+   pid_t pid;
+   pid_t parent_pid;
+#endif /* OPT_A2 */
+
 };
 
 /* This is the process structure for the kernel and for kernel-only threads. */
@@ -99,6 +126,25 @@ struct addrspace *curproc_getas(void);
 
 /* Change the address space of the current process, and return the old one. */
 struct addrspace *curproc_setas(struct addrspace *);
+
+
+// proc_table
+#if OPT_A2
+//create: return 0 for success and ENOMEM for failure
+int proc_table_create(void);
+
+//add: add a proc to current proc_table
+void proc_table_add(struct proc *new_proc);
+
+//remove: remove a proc from the current proc_table
+void proc_table_remove(pid_t pid);
+
+//find: find the proc with the given pid, return the proc if it is found, and NULL otherwise.
+struct proc_info *find_proc_info(pid_t pid);
+
+//clear: clear all dead children for the given process. 
+void proc_clear_dead_children(pid_t parent_pid);
+#endif /* OPT_A2 */
 
 
 #endif /* _PROC_H_ */

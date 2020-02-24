@@ -35,6 +35,7 @@
 #include <thread.h>
 #include <current.h>
 #include <syscall.h>
+#include <opt-A2.h>
 
 
 /*
@@ -129,6 +130,11 @@ syscall(struct trapframe *tf)
 			    (int)tf->tf_a2,
 			    (pid_t *)&retval);
 	  break;
+	#if OPT_A2
+	case SYS_fork:
+        err = sys_fork((struct trapframe *)tf, (pid_t *)&retval);
+	break;
+	#endif /* OPT_A2 */
 #endif // UW
 
 	    /* Add stuff here */
@@ -176,8 +182,23 @@ syscall(struct trapframe *tf)
  *
  * Thus, you can trash it and do things another way if you prefer.
  */
+#if OPT_A2
+void
+enter_forked_process(void *tf, unsigned long data2) 
+{
+	(void)data2;
+
+	struct trapframe tf_child = *(struct trapframe *) tf;
+	kfree(tf);
+	tf_child.tf_v0 = 0;
+	tf_child.tf_a3 = 0;
+	tf_child.tf_epc += 4;
+	mips_usermode(&tf_child);
+}
+#else
 void
 enter_forked_process(struct trapframe *tf)
 {
 	(void)tf;
 }
+#endif /* OPT_A2 */

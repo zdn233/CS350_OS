@@ -50,6 +50,8 @@
 #include <vfs.h>
 #include <synch.h>
 #include <kern/fcntl.h>  
+#include <kern/errno.h>
+#include <opt-A2.h>
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -69,6 +71,12 @@ static struct semaphore *proc_count_mutex;
 struct semaphore *no_proc_sem;   
 #endif  // UW
 
+
+
+#if OPT_A2
+static volatile signed int proc_counter;
+static struct lock *proc_pid_lock;
+#endif /* OPT_A2 */
 
 
 /*
@@ -102,6 +110,11 @@ proc_create(const char *name)
 #ifdef UW
 	proc->console = NULL;
 #endif // UW
+
+#if OPT_A2
+   proc->pid = -1;
+   proc->parent_pid = -1;
+#endif /* OPT_A2 */
 
 	return proc;
 }
@@ -208,6 +221,16 @@ proc_bootstrap(void)
     panic("could not create no_proc_sem semaphore\n");
   }
 #endif // UW 
+
+#if OPT_A2
+kproc->pid = 1;
+proc_counter = 2;
+proc_pid_lock = lock_create("proc_pid_lock");
+int error = proc_table_create();
+if (error) panic("no memory available");
+proc_table_lock = lock_create("proc_table_lock");
+proc_table_cv = cv_create("proc_table_cv");
+#endif /* OPT_A2 */
 }
 
 /*
@@ -271,6 +294,17 @@ proc_create_runprogram(const char *name)
 	V(proc_count_mutex);
 #endif // UW
 
+#if OPT_A2
+#endif /* OPT_A2 */
+
+lock_acquire(proc_pid_lock);
+proc->pid = proc_counter;
+proc_counter++;
+lock_release(proc_pid_lock);
+
+lock_acquire(proc_table_lock);
+proc_table_add(proc);
+lock_release(proc_table_lock);
 	return proc;
 }
 
@@ -364,3 +398,68 @@ curproc_setas(struct addrspace *newas)
 	spinlock_release(&proc->p_lock);
 	return oldas;
 }
+
+#if OPT_A2
+int proc_table_create(void) {
+	proc_table = array_create();
+	if (proc_table == NULL) return ENOMEM;
+	return 0;
+}
+
+void proc_table_add(struct proc *new_proc) {
+	KASSERT(lock_do_i_hold(proc_table_lock));
+
+	struct proc_info *new_info = kmalloc(sizeof(struct proc_info));
+
+	new_proc->parent_pid = curproc->pid;
+
+	new_info->self_pid = new_proc->pid;
+	new_info->parent_pid = curproc->pid;
+	new_info->alive_or_not = 1;
+	new_info->exit_code = 0;
+
+	array_add(proc_table, new_info, NULL);
+}
+
+void proc_table_remove(pid_t pid) {
+	KASSERT(lock_do_i_hold(proc_table_lock));
+
+	unsigned size = array_num(proc_table);
+	for (unsigned i = 0; i < size; ++i) {
+		struct proc_info *this_proc_info = array_get(proc_table, i);
+		if (this_proc_info->self_pid == pid) {
+			array_remove(proc_table, i);
+			break;
+		}
+	}
+}
+
+struct proc_info *find_proc_info(pid_t pid) {
+	KASSERT(lock_do_i_hold(proc_table_lock));
+
+	unsigned size = array_num(proc_table);
+	for (unsigned i = 0; i < size; ++i) {
+		struct proc_info *this_proc_info = array_get(proc_table, i);
+		if (this_proc_info->self_pid == pid) {
+			return this_proc_info;
+		}
+	}
+	return NULL;
+}
+
+void proc_clear_dead_children(pid_t parent_pid) {
+	KASSERT(lock_do_i_hold(proc_table_lock));
+
+	unsigned size = array_num(proc_table);
+	unsigned i = 0;
+	while(i < size) {
+		struct proc_info *this_proc_info = array_get(proc_table, i);
+		if (this_proc_info->parent_pid == parent_pid && !this_proc_info->alive_or_not) {
+			array_remove(proc_table, i);
+			size = array_num(proc_table);
+		} else {
+			i++;
+		}
+	}
+}
+#endif /* OPT_A2 */

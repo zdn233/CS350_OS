@@ -9,6 +9,10 @@
 #include <thread.h>
 #include <addrspace.h>
 #include <copyinout.h>
+#include <opt-A2.h>
+#include <syscall.h>
+#include <mips/trapframe.h>
+#include <synch.h>
 
   /* this implementation of sys__exit does not do anything with the exit code */
   /* this needs to be fixed to get exit() and waitpid() working properly */
@@ -19,7 +23,28 @@ void sys__exit(int exitcode) {
   struct proc *p = curproc;
   /* for now, just include this to keep the compiler from complaining about
      an unused variable */
-  (void)exitcode;
+
+
+  #if OPT_A2
+  lock_acquire(proc_table_lock);
+  //clear all dead children
+  proc_clear_dead_children(p->pid);
+  struct proc_info *parent_proc_info = find_proc_info(p->parent_pid);
+  //parent is in zombie state or dead, safe to delte curproc
+  if (parent_proc_info == NULL) {
+    proc_table_remove(p->pid);
+  } else if (!parent_proc_info->alive_or_not) {
+    proc_table_remove(p->pid);
+  } else {
+    struct proc_info *myinfo = find_proc_info(p->pid);
+    myinfo->alive_or_not = 0; // turns to zombie state now
+    myinfo->exit_code = exitcode;
+    //tell parent waitpid can proceed if there is any (parent has already called waitpid)
+    cv_broadcast(proc_table_cv, proc_table_lock);
+  }
+  lock_release(proc_table_lock);
+  #endif /* OPT_A2 */
+
 
   DEBUG(DB_SYSCALL,"Syscall: _exit(%d)\n",exitcode);
 
@@ -53,10 +78,15 @@ void sys__exit(int exitcode) {
 int
 sys_getpid(pid_t *retval)
 {
+  #if OPT_A2
+  *retval = curproc->pid;
+  return(0);
+  #else
   /* for now, this is just a stub that always returns a PID of 1 */
   /* you need to fix this to make it work properly */
   *retval = 1;
   return(0);
+  #endif /* OPT_A2 */
 }
 
 /* stub handler for waitpid() system call                */
@@ -79,11 +109,32 @@ sys_waitpid(pid_t pid,
      Fix this!
   */
 
+
+  #if OPT_A2
+  lock_acquire(proc_table_lock);
+  struct proc_info *child_proc_info = find_proc_info(pid);
+  if (child_proc_info == NULL) return ESRCH;
+  if (child_proc_info->parent_pid != curproc->pid) return ECHILD;
+  
+  while(child_proc_info->alive_or_not) { //now alive_or_not == 1 (child alive state)
+    cv_wait(proc_table_cv, proc_table_lock);
+  }
+
+  KASSERT(!child_proc_info->alive_or_not); //now alive_or_not == 0 (child zombie state)
+  exitstatus = _MKWAIT_EXIT(child_proc_info->exit_code);
+
+  //child info is retrieved and safe to delete now
+  proc_table_remove(pid);
+
+  lock_release(proc_table_lock);
+  #endif /* OPT_A2 */
+
+
   if (options != 0) {
     return(EINVAL);
   }
   /* for now, just pretend the exitstatus is 0 */
-  exitstatus = 0;
+  //exitstatus = 0;
   result = copyout((void *)&exitstatus,status,sizeof(int));
   if (result) {
     return(result);
@@ -91,4 +142,32 @@ sys_waitpid(pid_t pid,
   *retval = pid;
   return(0);
 }
+
+#if OPT_A2
+int 
+sys_fork(struct trapframe *tf, pid_t *retval) {
+  //create child process
+  struct proc *child_proc = proc_create_runprogram("child");
+  if (child_proc == NULL) return ENOMEM;
+
+  //create new address space and let it associated with the new child process
+  as_copy(curproc_getas(), &child_proc->p_addrspace);
+  if (child_proc->p_addrspace == NULL) {
+    proc_destroy(child_proc);
+    return ENOMEM;
+  }
+
+  //copy parent trapframe to OS heap, might need to handle error for no mem space
+  struct trapframe *copy_parent_tf = (struct trapframe *)kmalloc(sizeof(struct trapframe));
+  memcpy(copy_parent_tf, tf, sizeof(struct trapframe));
+  //have parent trapframe ready for thread_fork, begin thread_fork
+  thread_fork("new child thread", child_proc, &enter_forked_process, copy_parent_tf, 0);
+
+  //get child pid and returns 0 (success)
+  *retval = child_proc->pid;
+  return 0;
+}
+#endif /* OPT_A2 */
+
+
 
