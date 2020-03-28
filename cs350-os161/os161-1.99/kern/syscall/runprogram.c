@@ -44,6 +44,8 @@
 #include <vfs.h>
 #include <syscall.h>
 #include <test.h>
+#include <copyinout.h>
+#include <opt-A2.h>
 
 /*
  * Load program "progname" and start running it in usermode.
@@ -51,6 +53,109 @@
  *
  * Calls vfs_open on progname and thus may destroy it.
  */
+#if OPT_A2
+int
+runprogram(char *progname, char **args, int argc)
+{
+	struct addrspace *as;
+	struct vnode *v;
+	vaddr_t entrypoint, stackptr;
+	int result;
+
+
+
+	/* Open the file. */
+	result = vfs_open(progname, O_RDONLY, 0, &v);
+	if (result) {
+		return result;
+	}
+
+	/* We should be a new process. */
+	KASSERT(curproc_getas() == NULL);
+
+	/* Create a new address space. */
+	as = as_create();
+	if (as ==NULL) {
+		vfs_close(v);
+		return ENOMEM;
+	}
+
+	/* Switch to it and activate it. */
+	curproc_setas(as);
+	as_activate();
+
+	/* Load the executable. */
+	result = load_elf(v, &entrypoint);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		vfs_close(v);
+		return result;
+	}
+
+	/* Done with the file now. */
+	vfs_close(v);
+
+	/* Define the user stack in the address space */
+	result = as_define_stack(as, &stackptr);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+		return result;
+	}
+
+	// Copy args back to the user stack
+	int total_args_len = 0;
+	int count = 0;
+	
+	args[argc] = NULL;
+	while(args[count] != NULL) {
+		total_args_len = total_args_len + strlen((const char *) args[count]) + 1;
+		count++;
+	}
+
+	int num_for_string = DIVROUNDUP(total_args_len, 4);
+	int required = ROUNDUP(count + num_for_string + 1, 2);
+	int start_for_string = required - count - 1;
+  	vaddr_t array_of_args_stackaddr[count + 1];
+  	vaddr_t bot_of_stack = stackptr;
+	
+	//copy strings first
+	stackptr = stackptr - (start_for_string * 4);
+	array_of_args_stackaddr[count] = 0;
+	for(int i = 0; i < count; ++i) {
+		array_of_args_stackaddr[i] = stackptr;
+		result = copyoutstr(args[i], (userptr_t) stackptr, strlen(args[i]) + 1, NULL);
+		if (result) {
+			return result;
+		}
+		stackptr = stackptr + strlen(args[i]) + 1;
+	}
+
+  	//copy stack addresses next
+  	stackptr = bot_of_stack;
+  	stackptr = stackptr - (required * 4);
+
+  	for (int i = 0; i <= count; ++i) {
+		result = copyout(&array_of_args_stackaddr[i], (userptr_t) stackptr, sizeof(vaddr_t));
+    	if (result) {
+			return result;
+    	}
+		stackptr += 4;
+	}
+	
+	//change stackptr pointing to the top of the stack
+  	stackptr = bot_of_stack;
+  	stackptr = stackptr - (required * 4);
+
+	/* Warp to user mode. */
+	enter_new_process(argc /*argc*/, (userptr_t) stackptr /*userspace addr of argv*/,
+			  stackptr, entrypoint);
+	
+	/* enter_new_process does not return. */
+	panic("enter_new_process returned\n");
+	return EINVAL;
+}
+
+#else 
 int
 runprogram(char *progname)
 {
@@ -106,3 +211,4 @@ runprogram(char *progname)
 	return EINVAL;
 }
 
+#endif /* OPT_A2 */

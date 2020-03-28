@@ -39,6 +39,7 @@
 #include <vm.h>
 #include <mainbus.h>
 #include <syscall.h>
+#include <opt-A3.h>
 
 
 /* in exception.S */
@@ -86,6 +87,13 @@ kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
 		sig = SIGABRT;
 		break;
 	    case EX_MOD:
+		
+#if OPT_A3
+		sig = SIGILL;
+		sys__exit(sig);
+		break;
+#endif /* OPT_A3 */
+
 	    case EX_TLBL:
 	    case EX_TLBS:
 		sig = SIGSEGV;
